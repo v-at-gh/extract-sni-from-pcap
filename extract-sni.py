@@ -17,10 +17,10 @@ from json import dump
 SERVER_NAME_FIELD = 'tls.handshake.extensions_server_name'
 
 # Exclude servers within private networks; feel free to modify
-PRIVATE_ADDRESSES_LIST = [
+PRIVATE_NETWORKS_LIST = [
     '127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16']
-PRIVATE_ADDRESSES_STR = ', '.join(PRIVATE_ADDRESSES_LIST)
-PRIVATE_ADDRESSES_FILTER = 'not ip.dst in {' + PRIVATE_ADDRESSES_STR + '}'
+PRIVATE_NETWORKS_STR = ', '.join(PRIVATE_NETWORKS_LIST)
+PRIVATE_NETWORKS_FILTER = 'not ip.dst in {' + PRIVATE_NETWORKS_STR + '}'
 
 
 def die(code: int, message: Optional[str] = None) -> NoReturn:
@@ -58,7 +58,7 @@ def get_pairs_from_pcap(
     """
 
     # construct the filter for further packet processing
-    filter_parts = [PRIVATE_ADDRESSES_FILTER, SERVER_NAME_FIELD]
+    filter_parts = [PRIVATE_NETWORKS_FILTER, SERVER_NAME_FIELD]
     if display_filter is None:
         resulting_display_filter = " and ".join(filter_parts)
     else:
@@ -83,13 +83,9 @@ def get_pairs_from_pcap(
             die(result.returncode, f"Error: {result.stderr}")
         else:
             # deduplicate pairs
-            pairs = set(result.stdout.splitlines())
+            return set(tuple(p.split(',')) for p in result.stdout.splitlines())
     except Exception as e:
         raise e
-
-    pairs = set(tuple(p.split(',')) for p in pairs)
-
-    return pairs
 
 
 def sort_aton_dict(aton_dict: dict) -> dict:
@@ -157,19 +153,16 @@ def reassemble_pairs_to_dict(
     Returns:
         dict: A dictionary containing one or both mappings based on the flags.
     """
-    # if none of flags are set--set both
+    # if neither flag is set, set both
     if get_aton_flag is False and get_ntoa_flag is False:
         get_aton_flag = True
         get_ntoa_flag = True
 
     # initialize dict(s)
-    if get_aton_flag and get_ntoa_flag:
-        aton_dict: defaultdict[Any, list] = defaultdict(list)
-        ntoa_dict: defaultdict[Any, list] = defaultdict(list)
-    elif get_aton_flag:
-        aton_dict = defaultdict(list)
-    elif get_ntoa_flag:
-        ntoa_dict = defaultdict(list)
+    aton_dict: defaultdict[Any, list] = defaultdict(list) if get_aton_flag \
+        else defaultdict(lambda: [])
+    ntoa_dict: defaultdict[Any, list] = defaultdict(list) if get_ntoa_flag \
+        else defaultdict(lambda: [])
 
     # process <address, server_name> pairs
     for address, server_name in pairs:
@@ -179,27 +172,23 @@ def reassemble_pairs_to_dict(
             ntoa_dict[server_name].append(address)
 
     # sort resulting dict(s)
-    if get_aton_flag:
-        sorted_aton_dict = sort_aton_dict(aton_dict)
-    if get_ntoa_flag:
-        sorted_ntoa_dict = sort_ntoa_dict(ntoa_dict)
+    sorted_aton_dict = sort_aton_dict(aton_dict) if get_aton_flag else None
+    sorted_ntoa_dict = sort_ntoa_dict(ntoa_dict) if get_ntoa_flag else None
 
     # add header(s) (key(s)) for resulting dict(s)
     if get_aton_flag and get_ntoa_flag:
-        resulting_dict = {
+        return {
             'address_to_server_names': sorted_aton_dict,
             'server_name_to_addresses': sorted_ntoa_dict
         }
     elif get_aton_flag:
-        resulting_dict = {
+        return {
             'address_to_server_names':  sorted_aton_dict
         }
     elif get_ntoa_flag:
-        resulting_dict = {
+        return {
             'server_name_to_addresses': sorted_ntoa_dict
         }
-
-    return resulting_dict
 
 
 def get_sni_dict(
