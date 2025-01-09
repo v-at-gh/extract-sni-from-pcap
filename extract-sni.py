@@ -75,20 +75,19 @@ def get_pairs_from_pcap(
 
     try:
         result = subprocess_run(
-            command, capture_output=True, check=False,
+            command,
+            check=False, capture_output=True,
             text=True, encoding='utf-8'
         )
         if 0 != result.returncode:
             die(result.returncode, f"Error: {result.stderr}")
         else:
-            pairs = result.stdout.splitlines()
+            # deduplicate pairs
+            pairs = set(result.stdout.splitlines())
     except Exception as e:
         raise e
 
-    # deduplicate pairs
-    pairs = set(p for p in [
-        tuple(p.split(',')) for p in pairs
-        if len(p.split(',')) == 2])
+    pairs = set(tuple(p.split(',')) for p in pairs)
 
     return pairs
 
@@ -129,10 +128,9 @@ def sort_ntoa_dict(ntoa_dict: dict):
     """
     # sort IP addresses in a right way
     for server_name in ntoa_dict:
-        ntoa_dict[server_name].sort(
-            key=lambda ip: ip_address(ip))
+        ntoa_dict[server_name].sort(key=ip_address)
 
-    # sort domains from top to bottom
+    # sort domains from top-level to bottom
     sorted_server_name_to_addresses = dict(
         sorted(
             ntoa_dict.items(),
@@ -204,41 +202,6 @@ def reassemble_pairs_to_dict(
     return resulting_dict
 
 
-# TODO: do we really need this validation now?
-def pcap_to_path(pcap_path_str: str) -> Path:
-    """
-    Validates the existence and type of the provided pcap file.
-
-    Args:
-        pcap_path_str (str): Path to the pcap file.
-
-    Returns:
-        Path: A Path object for the validated pcap file.
-
-    Raises:
-        Exception: If the file does not exist or is not a valid pcap file.
-    """
-    pcap_file_path_obj = Path(pcap_path_str)
-
-    if not Path.exists(pcap_file_path_obj):
-        msg = f"File {pcap_path_str} does not exist."
-        die(1, msg)
-    try:
-        # TODO: implement a better handling
-        pcap_file_type = subprocess_run(
-            ["file", pcap_path_str], text=True, capture_output=True,
-            check=True
-        ).stdout.strip()
-    except Exception as e:
-        raise e
-
-    if 'pcap capture file' not in pcap_file_type and \
-       'pcapng capture file' not in pcap_file_type:
-        die(1, f"File {pcap_path_str} is not packet capture file.")
-
-    return pcap_file_path_obj
-
-
 def get_sni_dict(
         pcap_path: str,
         display_filter: Optional[str] = None,
@@ -259,9 +222,6 @@ def get_sni_dict(
         dict: A dictionary containing sorted mappings of SNIs to addresses\
             and vice versa.
     """
-    # TODO: do we really need this validation now?
-    pcap_path = pcap_to_path(pcap_path)
-
     pairs = get_pairs_from_pcap(
         pcap_path,
         display_filter=display_filter
@@ -295,17 +255,21 @@ def parse_arguments() -> Namespace:
         Namespace: An argparse Namespace object containing the parsed arguments
     """
     p = ArgumentParser(
-        description='Process a pcap or pcapng file and save SNIs as a JSON file.')
+        description='Process a pcap or pcapng file and save SNIs \
+            as a JSON file.')
     p.add_argument('pcap', type=str,
                    help='Path to the pcap or pcapng file.')
     p.add_argument('-f', '--filter', type=str,
                    help='Display filter for narrowing down the traffic.')
     p.add_argument('-i', '--indent', type=int,
-                   help='Indentation level for the JSON output (default: none).')
+                   help='Indentation level for the JSON output \
+                    (default: none).')
     p.add_argument('-N', '--ntoa', action='store_true',
-                   help='Include server names to addresses mapping in the output.')
+                   help='Include server names to addresses mapping \
+                    in the output.')
     p.add_argument('-A', '--aton', action='store_true',
-                   help='Include addresses to server names mapping in the output.')
+                   help='Include addresses to server names mapping \
+                    in the output.')
 
     args = p.parse_args()
 
