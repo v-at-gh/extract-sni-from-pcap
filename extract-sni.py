@@ -6,15 +6,18 @@ from sys import (
     stderr as sys_stderr
 )
 from pathlib import Path
-from typing import Any, NoReturn, Optional
+from typing import NoReturn, Optional
 from subprocess import run as subprocess_run
 from collections import defaultdict
 from ipaddress import ip_address
 from argparse import ArgumentParser, Namespace
-from json import dump
+from json import dump as json_dump
 
-# Field for filtering frames/packets by presence of SNI in them
-SERVER_NAME_FIELD = 'tls.handshake.extensions_server_name'
+# Field for filtering packets by presence of SNI/Host in them
+TLS_SNI_FIELD = 'tls.handshake.extensions_server_name'
+HTTP_HOST_FIELD = 'http.host'
+SNI_FIELDS = [TLS_SNI_FIELD, HTTP_HOST_FIELD]
+SNI_FIELDS_FILTER = '(' + ' or '.join(SNI_FIELDS) + ')'
 
 # Exclude servers within private networks; feel free to modify
 PRIVATE_NETWORKS_LIST = [
@@ -43,7 +46,7 @@ def die(code: int, message: Optional[str] = None) -> NoReturn:
 
 def get_pairs_from_pcap(
         pcap_file_path_str: str,
-        display_filter: Optional[str] = None
+        display_filter: Optional[str]
 ):
     """
     Extracts (IP address, server name) pairs from a pcap file using tshark.
@@ -58,7 +61,7 @@ def get_pairs_from_pcap(
     """
 
     # construct the filter for further packet processing
-    filter_parts = [PRIVATE_NETWORKS_FILTER, SERVER_NAME_FIELD]
+    filter_parts = [PRIVATE_NETWORKS_FILTER, SNI_FIELDS_FILTER]
     if display_filter is None:
         resulting_display_filter = " and ".join(filter_parts)
     else:
@@ -70,7 +73,7 @@ def get_pairs_from_pcap(
         "tshark", "-n", "-r", pcap_file_path_str,
         "-Y", resulting_display_filter,
         "-T", "fields", "-E", "separator=,",
-        "-e", "ip.dst", "-e", SERVER_NAME_FIELD
+        "-e", "ip.dst", "-e", TLS_SNI_FIELD, "-e", HTTP_HOST_FIELD
     ]
 
     try:
@@ -112,7 +115,7 @@ def sort_aton_dict(aton_dict: dict) -> dict:
     return sorted_address_to_server_names
 
 
-def sort_ntoa_dict(ntoa_dict: dict):
+def sort_ntoa_dict(ntoa_dict: dict) -> dict:
     """
     Sorts the server-name-to-address dictionary by server name and IP address.
 
@@ -137,8 +140,9 @@ def sort_ntoa_dict(ntoa_dict: dict):
 
 def reassemble_pairs_to_dict(
         pairs: set,
-        get_aton_flag: bool = False,
-        get_ntoa_flag: bool = False
+        get_aton_flag: bool,
+        get_ntoa_flag: bool,
+        sort: bool
 ):
     """
     Converts (IP address, server name) pairs into sorted dictionaries.
@@ -149,46 +153,43 @@ def reassemble_pairs_to_dict(
             mapping.
         get_ntoa_flag (bool): Whether to include server-name-to-address\
             mapping.
+        sort (bool): Whether to sort keys and values of resulting dictionary.
 
     Returns:
         dict: A dictionary containing one or both mappings based on the flags.
     """
-    # if neither flag is set, set both
-    if get_aton_flag is False and get_ntoa_flag is False:
-        get_aton_flag = True
-        get_ntoa_flag = True
-
     # initialize dict(s)
-    aton_dict: defaultdict[Any, list] = defaultdict(list) if get_aton_flag \
-        else defaultdict(lambda: [])
-    ntoa_dict: defaultdict[Any, list] = defaultdict(list) if get_ntoa_flag \
-        else defaultdict(lambda: [])
+    aton_dict = defaultdict(list) if get_aton_flag else defaultdict(lambda: [])
+    ntoa_dict = defaultdict(list) if get_ntoa_flag else defaultdict(lambda: [])
 
-    # process <address, server_name> pairs
-    for address, server_name in pairs:
+    # process <address, tls, http> tuples
+    for address, server_name_tls, server_name_http in pairs:
         if get_aton_flag:
-            aton_dict[address].append(server_name)
+            if server_name_tls:
+                aton_dict[address].append(server_name_tls)
+            if server_name_http:
+                aton_dict[address].append(server_name_http)
         if get_ntoa_flag:
-            ntoa_dict[server_name].append(address)
+            if server_name_tls:
+                ntoa_dict[server_name_tls].append(address)
+            if server_name_http:
+                ntoa_dict[server_name_http].append(address)
 
-    # sort resulting dict(s)
-    sorted_aton_dict = sort_aton_dict(aton_dict) if get_aton_flag else None
-    sorted_ntoa_dict = sort_ntoa_dict(ntoa_dict) if get_ntoa_flag else None
+    if sort:
+        # sort resulting dict(s)
+        aton_dict = sort_aton_dict(aton_dict) # if get_aton_flag else None
+        ntoa_dict = sort_ntoa_dict(ntoa_dict) # if get_ntoa_flag else None
 
     # add header(s) (key(s)) for resulting dict(s)
     if get_aton_flag and get_ntoa_flag:
         return {
-            'address_to_server_names': sorted_aton_dict,
-            'server_name_to_addresses': sorted_ntoa_dict
+            'address_to_server_names': aton_dict,
+            'server_name_to_addresses': ntoa_dict
         }
-    elif get_aton_flag:
-        return {
-            'address_to_server_names':  sorted_aton_dict
-        }
-    elif get_ntoa_flag:
-        return {
-            'server_name_to_addresses': sorted_ntoa_dict
-        }
+    if get_aton_flag:
+        return {'address_to_server_names':  aton_dict}
+    if get_ntoa_flag:
+        return {'server_name_to_addresses': ntoa_dict}
 
 
 def get_sni_dict(
@@ -196,6 +197,7 @@ def get_sni_dict(
         display_filter: Optional[str] = None,
         get_ntoa_flag: bool = False,
         get_aton_flag: bool = False,
+        sort: bool = False
 ):
     """
     Processes a pcap file and returns a dictionary of SNI mappings.
@@ -206,11 +208,17 @@ def get_sni_dict(
             packet selection.
         get_ntoa_flag (bool): Whether to include SNI-to-address mapping.
         get_aton_flag (bool): Whether to include address-to-SNI mapping.
+        sort (bool): Whether to sort keys and values of resulting dictionary.
 
     Returns:
         dict: A dictionary containing sorted mappings of SNIs to addresses\
             and vice versa.
     """
+    # if neither flag is set, set both
+    if get_aton_flag is False and get_ntoa_flag is False:
+        get_aton_flag = True
+        get_ntoa_flag = True
+
     pairs = get_pairs_from_pcap(
         pcap_path,
         display_filter=display_filter
@@ -219,7 +227,8 @@ def get_sni_dict(
     data = reassemble_pairs_to_dict(
         pairs=pairs,
         get_aton_flag=get_aton_flag,
-        get_ntoa_flag=get_ntoa_flag
+        get_ntoa_flag=get_ntoa_flag,
+        sort=sort
     )
 
     return data
@@ -230,15 +239,20 @@ def parse_arguments() -> Namespace:
     Parses command-line arguments for the script.
 
     Command-line arguments:
-        - `pcap` (str, required): Path to the input pcap or pcapng file.
+        - `pcap` (str, required): Path to the input pcap or pcapng files.
+        - `-o` / `--outfile` (str, optional): Path to save the resulting
+          JSON file.
+        - `-O` / `--ovewwrite` (flag, optional): Overwrite the outfile.
         - `-f` / `--filter` (str, optional): Display filter for narrowing
-          down traffic (alternative to `-Y`).
+          down traffic (the `tshark`'s `-Y`).
         - `-i` / `--indent` (int, optional): Number of spaces for JSON output
           indentation.
         - `-N` / `--ntoa` (flag, optional): If provided, includes server names
           to their associated IP addresses in the output.
         - `-A` / `--aton` (flag, optional): If provided, includes IP addresses
           to their associated server names in the output.
+        - `-s` / `--sort` (flag, optional): If provided, sort keys and values
+          of resulting dictionary.
 
     Returns:
         Namespace: An argparse Namespace object containing the parsed arguments
@@ -247,7 +261,11 @@ def parse_arguments() -> Namespace:
         description='Process a pcap or pcapng file and save SNIs \
             as a JSON file.')
     p.add_argument('pcap', type=str,
-                   help='Path to the pcap or pcapng file.')
+                   help='Path to the pcap or pcapng files.')
+    p.add_argument('-o', '--outfile', type=str,
+                   help='Path to save the resulting JSON file.')
+    p.add_argument('-O', '--overwrite', action='store_true',
+                   help='Overwrite the output file.')
     p.add_argument('-f', '--filter', type=str,
                    help='Display filter for narrowing down the traffic.')
     p.add_argument('-i', '--indent', type=int,
@@ -259,13 +277,15 @@ def parse_arguments() -> Namespace:
     p.add_argument('-A', '--aton', action='store_true',
                    help='Include addresses to server names mapping \
                     in the output.')
+    p.add_argument('-s', '--sort', action='store_true',
+                   help='Sort keys and values of resulting mappings.')
 
     args = p.parse_args()
 
     return args
 
 
-def main():
+def main() -> NoReturn:
     """
     Main entry point for the script. Parses arguments, processes the pcap file,
     and outputs the result as JSON.
@@ -275,20 +295,37 @@ def main():
     if not Path(args.pcap).exists():
         die(1, f"Error: The file {args.pcap} does not exist.")
 
+    if not args.outfile:
+        outfile = sys_stdout
+    elif Path(args.outfile).exists() and not args.overwrite:
+        die(2, f"File {args.outfile} exists.")
+    else:
+        outfile = Path(args.outfile)
+
     sni_dict = get_sni_dict(
         args.pcap,
         display_filter=args.filter,
         get_ntoa_flag=args.ntoa,
-        get_aton_flag=args.aton
+        get_aton_flag=args.aton,
+        sort=args.sort
     )
 
     try:
-        dump(
-            sni_dict,
-            fp=sys_stdout,
-            ensure_ascii=False,
-            indent=args.indent
-        )
+        if outfile is sys_stdout:
+            json_dump(
+                sni_dict,
+                fp=outfile,
+                ensure_ascii=False,
+                indent=args.indent
+            )
+        else:
+            with open(outfile, mode='w', encoding='utf-8') as f:
+                json_dump(
+                    sni_dict,
+                    fp=f,
+                    ensure_ascii=False,
+                    indent=args.indent
+                )
     except Exception as e:
         die(3, e)
 
