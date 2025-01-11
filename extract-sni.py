@@ -13,6 +13,8 @@ from ipaddress import ip_address
 from argparse import ArgumentParser, Namespace
 from json import dump as json_dump
 
+TSHARK_BIN = "tshark"
+
 # Field for filtering packets by presence of SNI/Host in them
 TLS_SNI_FIELD = 'tls.handshake.extensions_server_name'
 HTTP_HOST_FIELD = 'http.host'
@@ -43,10 +45,11 @@ def main() -> NoReturn:
     else:
         outfile = Path(args.outfile)
 
-    if Path(args.decrypt).exists():
-        session_keys_file = args.decrypt
-    elif not Path(args.decrypt).exists():
-        die(3, f"Error: File {args.decrypt} does not exist.")
+    if args.decrypt:
+        if Path(args.decrypt).exists():
+            session_keys_file = args.decrypt
+        elif not Path(args.decrypt).exists():
+            die(3, f"Error: File {args.decrypt} does not exist.")
     else:
         session_keys_file = None
 
@@ -225,10 +228,12 @@ def get_pairs_from_pcap(
 
     # the resulting command argv
     command = [
-        "tshark", "-n", "-r", pcap_file_path_str,
+        TSHARK_BIN, "-n", "-r", pcap_file_path_str,
         "-Y", resulting_display_filter,
         "-T", "fields", "-E", "separator=,",
-        "-e", "ip.dst", "-e", TLS_SNI_FIELD, "-e", HTTP_HOST_FIELD
+        "-e", "ip.dst",
+        "-e", TLS_SNI_FIELD,
+        "-e", HTTP_HOST_FIELD
     ]
 
     if session_keys_file:
@@ -270,8 +275,10 @@ def reassemble_pairs_to_dict(
         dict: A dictionary containing one or both mappings based on the flags.
     """
     # initialize dict(s)
-    aton_dict = defaultdict(set) if get_aton_flag else defaultdict(lambda: set())
-    ntoa_dict = defaultdict(set) if get_ntoa_flag else defaultdict(lambda: set())
+    if get_aton_flag:
+        aton_dict = defaultdict(set)
+    if get_ntoa_flag:
+        ntoa_dict = defaultdict(set)
 
     # process <address, tls, http> tuples
     for address, server_name_tls, server_name_http in pairs:
